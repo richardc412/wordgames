@@ -1,0 +1,19 @@
+{
+  "name": "wordgames",
+  "version": "1.0.0",
+  "description": "Word Games Application",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:backend\"",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:backend": "cd backend && go run main.go",
+    "install:frontend": "cd frontend && npm install",
+    "install:backend": "cd backend && go mod tidy",
+    "install": "npm run install:frontend && npm run install:backend"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "keywords": ["word-games", "react", "go", "gin"],
+  "author": "",
+  "license": "MIT"
+} 
