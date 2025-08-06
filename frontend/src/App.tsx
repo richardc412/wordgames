@@ -1,15 +1,20 @@
 import "./App.css";
+import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 import Header from "./components/Header";
-import ServerButton from "./components/ServerButton";
+import Home from "./pages/Home";
+import Match from "./pages/Match";
 
 function App() {
   return (
-    <div className="min-h-screen bg-gray-50">
-      <Header title="Worduel" />
-      <div className="max-w-7xl mx-auto px-6 py-8">
-        <ServerButton />
+    <Router>
+      <div className="min-h-screen bg-gray-50">
+        <Header title="Worduel" />
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/match" element={<Match />} />
+        </Routes>
       </div>
-    </div>
+    </Router>
   );
 }
 
