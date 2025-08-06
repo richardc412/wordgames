@@ -2,11 +2,14 @@ import { useState, useEffect, useCallback } from "react";
 import WordleGrid from "./WordleGrid";
 import type { WordleSquareState } from "./types";
 
+const GRID_WIDTH = 5;
+const GRID_HEIGHT = 6;
+
 const generateEmptyGrid = (): WordleSquareState[][] => {
-  return Array(6)
+  return Array(GRID_HEIGHT)
     .fill(null)
     .map(() =>
-      Array(5)
+      Array(GRID_WIDTH)
         .fill(null)
         .map(() => ({
           character: "",
@@ -16,12 +19,16 @@ const generateEmptyGrid = (): WordleSquareState[][] => {
 };
 
 const isWordValid = (word: string) => {
-  return word.length === 5;
+  return word.length === GRID_WIDTH;
 };
 
 const isWordInDictionary = (word: string) => {
   // TODO: Implement this
-  return word.length === 5;
+  return word.length === GRID_WIDTH;
+};
+
+const withinBounds = (row: number, column: number) => {
+  return row >= 0 && row < GRID_HEIGHT && column >= 0 && column < GRID_WIDTH;
 };
 
 const ANSWER = "hello";
@@ -48,7 +55,7 @@ const WordleManager = () => {
 
   const generateHints = useCallback(
     (currentWord: string, answer: string): WordleSquareState[] => {
-      const hints: WordleSquareState[] = Array(5)
+      const hints: WordleSquareState[] = Array(GRID_WIDTH)
         .fill(null)
         .map(() => ({
           character: "",
@@ -59,7 +66,7 @@ const WordleManager = () => {
       let remainingWord = currentWord;
 
       // First pass: find exact matches (green)
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < GRID_WIDTH; i++) {
         if (remainingWord[i] === remainingAnswer[i]) {
           hints[i] = { character: remainingWord[i], state: "green" };
           remainingAnswer = replaceCharAtIndex(remainingAnswer, i, " ");
@@ -68,7 +75,7 @@ const WordleManager = () => {
       }
 
       // Second pass: find misplaced letters (yellow)
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < GRID_WIDTH; i++) {
         if (
           remainingWord[i] !== " " &&
           remainingAnswer.includes(remainingWord[i])
@@ -85,7 +92,7 @@ const WordleManager = () => {
       }
 
       // Third pass: mark remaining as incorrect (grey)
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < GRID_WIDTH; i++) {
         if (hints[i].state === "white") {
           hints[i] = { character: currentWord[i], state: "grey" };
         }
@@ -98,8 +105,7 @@ const WordleManager = () => {
 
   const handleKeyPress = useCallback(
     (key: string): void => {
-      console.log(currentColumn);
-      if (currentColumn < 5 && currentRow < 6) {
+      if (withinBounds(currentRow, currentColumn)) {
         setGrid(
           grid.map((row, rowIndex) =>
             rowIndex === currentRow
@@ -117,7 +123,10 @@ const WordleManager = () => {
     [currentRow, currentColumn, grid]
   );
 
-  const handleEnterPress = useCallback(() => {
+  const handleEnterPress = useCallback((): void => {
+    if (currentRow >= GRID_HEIGHT) {
+      return;
+    }
     let currentWord = getCurrentWord();
     if (isWordValid(currentWord) && isWordInDictionary(currentWord)) {
       setGrid(
@@ -131,8 +140,7 @@ const WordleManager = () => {
   }, [getCurrentWord]);
 
   const handleBackspacePress = useCallback(() => {
-    console.log(currentColumn);
-    if (currentColumn > 0) {
+    if (withinBounds(currentRow, currentColumn - 1)) {
       setGrid(
         grid.map((row, rowIndex) =>
           rowIndex === currentRow
