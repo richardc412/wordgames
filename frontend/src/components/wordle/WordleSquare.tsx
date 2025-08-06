@@ -1,16 +1,15 @@
-import type { SquareState } from "./constants";
+import type { WordleSquareState } from "./types";
 
 interface WordleSquareProps {
-  character: string;
-  state: SquareState;
+  WordleSquareState: WordleSquareState;
 }
 
-const WordleSquare = ({ character, state }: WordleSquareProps) => {
+const WordleSquare = ({ WordleSquareState }: WordleSquareProps) => {
   const getSquareClasses = () => {
     const baseClasses =
       "w-12 h-12 border-2 flex items-center justify-center text-xl font-bold uppercase transition-all duration-200";
 
-    switch (state) {
+    switch (WordleSquareState.state) {
       case "white":
         return `${baseClasses} border-gray-300 bg-white`;
       case "disabled":
@@ -26,7 +25,9 @@ const WordleSquare = ({ character, state }: WordleSquareProps) => {
     }
   };
 
-  return <div className={getSquareClasses()}>{character}</div>;
+  return (
+    <div className={getSquareClasses()}>{WordleSquareState.character}</div>
+  );
 };
 
 export default WordleSquare;
