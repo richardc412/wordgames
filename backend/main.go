@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"time"
 
+	"server/internal/auth"
+
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -18,7 +20,7 @@ func createMatch(c *gin.Context) {
     matchID := uuid.NewString()
     playerID := uuid.NewString()
 
-    tok, err := newToken(matchID, playerID, "host")
+    tok, err := auth.NewToken(matchID, playerID, "host")
     if err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
         return
@@ -43,7 +45,7 @@ func joinMatch(c *gin.Context) {
         return
     }
 
-    claims, err := parseToken(inviteToken)
+    claims, err := auth.ParseToken(inviteToken)
     if err != nil {
         c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid invite token"})
         return
@@ -52,7 +54,7 @@ func joinMatch(c *gin.Context) {
     matchID := claims.Mid
     newPlayerID := uuid.NewString()
 
-    playerTok, err := newToken(matchID, newPlayerID, "guest")
+    playerTok, err := auth.NewToken(matchID, newPlayerID, "guest")
     if err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
         return
