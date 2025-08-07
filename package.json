@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:backend\"",
     "dev:frontend": "cd frontend && npm run dev",
-    "dev:backend": "cd backend && go run main.go",
+    "dev:backend": "cd backend && go run .",
     "install:frontend": "cd frontend && npm install",
     "install:backend": "cd backend && go mod tidy",
     "install": "npm run install:frontend && npm run install:backend"
@@ -13,7 +13,12 @@
   "devDependencies": {
     "concurrently": "^8.2.2"
   },
-  "keywords": ["word-games", "react", "go", "gin"],
+  "keywords": [
+    "word-games",
+    "react",
+    "go",
+    "gin"
+  ],
   "author": "",
   "license": "MIT"
-} 
+}
