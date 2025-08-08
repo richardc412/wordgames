@@ -1,104 +1,110 @@
+// backend/main.go
 package main
 
 import (
+	"context"
+	"database/sql"
 	"log"
 	"net/http"
+	"os"
 	"time"
-
-	"server/internal/auth"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	_ "github.com/lib/pq" // <-- driver
+
+	"server/internal/auth"
+	"server/internal/database/domain"
+	"server/internal/database/postgres"
 )
 
-// -----------------------------------------------------------------------------
-// Handlers
-// -----------------------------------------------------------------------------
-
-func createMatch(c *gin.Context) {
-    matchID := uuid.NewString()
-    playerID := uuid.NewString()
-
-    tok, err := auth.NewToken(matchID, playerID, "host")
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-        return
-    }
-
-    inviteURL := c.Request.Host + "/join?invite=" + tok
-
-    // persistence layer for match header would go here
-
-    c.JSON(http.StatusCreated, gin.H{
-        "matchId": matchID,
-        "playerId": playerID,
-        "token":   tok,
-        "invite":  inviteURL,
-    })
+// ----------------------------------------------------------------------------
+// App – holds all shared dependencies for handlers
+// ----------------------------------------------------------------------------
+type App struct {
+	Repo domain.MatchRepository
 }
 
-func joinMatch(c *gin.Context) {
-    inviteToken := c.Query("invite")
-    if inviteToken == "" {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "missing invite token"})
-        return
-    }
+// ----------------------------------------------------------------------------
+// Handlers (now methods on *App)
+// ----------------------------------------------------------------------------
 
-    claims, err := auth.ParseToken(inviteToken)
-    if err != nil {
-        c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid invite token"})
-        return
-    }
+func (a *App) createMatch(c *gin.Context) {
+	matchID  := uuid.NewString()
+	playerID := uuid.NewString()
 
-    matchID := claims.Mid
-    newPlayerID := uuid.NewString()
+	// Build initial domain object
+	now := time.Now()
+	m := &domain.WordleMatch{
+		ID:        matchID,
+		Status:    domain.MatchWaiting,
+		CreatedAt: now,
+		Players: [2]domain.Player{
+			{ID: playerID, Connected: true},
+		},
+	}
 
-    playerTok, err := auth.NewToken(matchID, newPlayerID, "guest")
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-        return
-    }
+	// Persist
+	if err := a.Repo.Create(c.Request.Context(), m); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 
-    c.JSON(http.StatusCreated, gin.H{
-        "matchId":  matchID,
-        "playerId": newPlayerID,
-        "token":    playerTok,
-    })
+	// Auth token the client will use for future requests / websocket
+	tok, _ := auth.NewToken(matchID, playerID, "host")
+
+	c.JSON(http.StatusCreated, gin.H{
+		"matchId":  matchID,
+		"playerId": playerID,
+		"token":    tok,
+	})
 }
 
-// -----------------------------------------------------------------------------
-// main router / CORS glue
-// -----------------------------------------------------------------------------
+func (a *App) joinMatch(c *gin.Context) {
+	// … your existing code …
+}
 
+// ----------------------------------------------------------------------------
+// main – initialise DB, repo, router, etc.
+// ----------------------------------------------------------------------------
 func main() {
-    r := gin.Default()
+	// 1. Connect to PostgreSQL
+	dsn := os.Getenv("DATABASE_URL") // e.g. postgres://user:pass@localhost:5432/wordle
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		log.Fatalf("opening DB: %v", err)
+	}
+	db.SetMaxOpenConns(10)
+	db.SetConnMaxIdleTime(5 * time.Minute)
 
-    // ---- CORS --------------------------------------------------------------
-    config := cors.Config{
-        AllowOrigins: []string{
-            "http://localhost:5173", "http://localhost:3000",
-            "http://127.0.0.1:5173", "http://127.0.0.1:3000",
-        },
-        AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-        AllowHeaders: []string{"Origin", "Content-Type", "Accept", "Authorization"},
-        AllowCredentials: true,
-        MaxAge: 12 * time.Hour,
-    }
-    r.Use(cors.New(config))
+	// Optional: ping on startup to fail fast
+	if err := db.PingContext(context.Background()); err != nil {
+		log.Fatalf("ping DB: %v", err)
+	}
 
-    // ---- routes ------------------------------------------------------------
-    r.GET("/", func(c *gin.Context) {
-        c.String(http.StatusOK, "Hello, Gin!")
-    })
+	// 2. Create the repository
+	repo := postgres.NewMatchRepository(db)
 
-    r.POST("/matches", createMatch) // host creates a match
-    r.GET("/join", joinMatch)       // guest accepts invite
+	// 3. Build the App with shared deps
+	app := &App{Repo: repo}
 
-    log.Println("listening on :8080 …")
-    if err := r.Run(":8080"); err != nil {
-        log.Fatal(err)
-    }
+	// 4. Router setup
+	r := gin.Default()
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"http://localhost:5173"},
+		AllowMethods:     []string{"GET", "POST"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
+	}))
+
+	// 5. Routes – bind methods
+	r.POST("/matches", app.createMatch)
+	r.GET("/join",   app.joinMatch)
+
+	log.Println("listening on :8080 …")
+	if err := r.Run(":8080"); err != nil {
+		log.Fatal(err)
+	}
 }
-
-
