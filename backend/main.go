@@ -26,7 +26,7 @@ import (
 // App – holds all shared dependencies for handlers
 // ----------------------------------------------------------------------------
 type App struct {
-	Repo domain.MatchRepository
+	MatchRepo domain.MatchRepository
 }
 
 // ----------------------------------------------------------------------------
@@ -39,7 +39,7 @@ func (a *App) createMatch(c *gin.Context) {
 
 	// Build initial domain object
 	now := time.Now()
-	m := &domain.WordleMatch{
+	match := &domain.WordleMatch{
 		ID:        matchID,
 		Status:    domain.MatchWaiting,
 		CreatedAt: now,
@@ -49,7 +49,7 @@ func (a *App) createMatch(c *gin.Context) {
 	}
 
 	// Persist
-	if err := a.Repo.Create(c.Request.Context(), m); err != nil {
+	if err := a.MatchRepo.Create(c.Request.Context(), match); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -98,7 +98,7 @@ func main() {
     repo := postgresrepo.NewMatchRepository(gormDB)
 
     // 4. Build the App with shared deps
-	app := &App{Repo: repo}
+	app := &App{MatchRepo: repo}
 
     // 5. Router setup
 	r := gin.Default()
