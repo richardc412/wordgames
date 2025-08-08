@@ -1,62 +1,55 @@
 // backend/internal/database/postgres/match_repository.go
-// Package postgres provides a concrete implementation of the domain.MatchRepository
-// interface using PostgreSQL and a single JSONB column to hold the entire
-// WordleMatch document. Each write happens inside a transaction and locks the
-// row (SELECT .. FOR UPDATE) to guarantee atomicity and consistency when the
-// game is updated concurrently by two websocket connections.
-//
-// Table DDL that matches this repository:
-//
-//	CREATE TABLE matches (
-//	    id         text PRIMARY KEY,
-//	    data       jsonb        NOT NULL,
-//	    updated_at timestamptz  NOT NULL DEFAULT now()
-//	);
-//
-// A partial index on (data ->> 'status') could be useful for lobbies, e.g.:
-//
-//	CREATE INDEX matches_waiting_idx ON matches ((data ->> 'status'))
-//	WHERE (data ->> 'status') = 'waiting';
+// GORM-based implementation of the MatchRepository storing the domain object
+// as a single JSONB column with row-level locking for atomic updates.
 package postgres
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"time"
 
 	"server/internal/database/domain"
-)
 
-// Ensure we have the pq driver (or pgx) linked if the user imports it in main.
-// _ "github.com/lib/pq"
+	"gorm.io/datatypes"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
 
 var ErrNotFound = errors.New("match not found")
 
-// MatchRepository is a PostgreSQL-backed implementation of domain.MatchRepository.
-type MatchRepository struct {
-    db *sql.DB
+// matchRow is the GORM model for the matches table.
+type matchRow struct {
+    ID        string         `gorm:"primaryKey;type:text"`
+    Data      datatypes.JSON `gorm:"type:jsonb;not null"`
+    UpdatedAt time.Time      `gorm:"type:timestamptz;not null;autoUpdateTime"`
 }
 
-// NewMatchRepository returns a repo backed by the given *sql.DB.
-func NewMatchRepository(db *sql.DB) *MatchRepository {
+func (matchRow) TableName() string { return "matches" }
+
+// MatchRepository is a PostgreSQL-backed implementation of domain.MatchRepository using GORM.
+type MatchRepository struct {
+    db *gorm.DB
+}
+
+// NewMatchRepository returns a repo backed by the given *gorm.DB.
+func NewMatchRepository(db *gorm.DB) *MatchRepository {
     return &MatchRepository{db: db}
 }
 
-// helper: fetch + lock a match row inside an open Tx.
-func fetchMatchTx(ctx context.Context, tx *sql.Tx, id string) (*domain.WordleMatch, error) {
-    var payload []byte
-    err := tx.QueryRowContext(ctx, `SELECT data FROM matches WHERE id = $1 FOR UPDATE`, id).Scan(&payload)
-    if err == sql.ErrNoRows {
-        return nil, ErrNotFound
-    }
-    if err != nil {
+// fetchLocked loads and locks a row within the provided transaction.
+func fetchLocked(ctx context.Context, tx *gorm.DB, id string) (*domain.WordleMatch, error) {
+    var row matchRow
+    if err := tx.WithContext(ctx).
+        Clauses(clause.Locking{Strength: "UPDATE"}).
+        First(&row, "id = ?", id).Error; err != nil {
+        if errors.Is(err, gorm.ErrRecordNotFound) {
+            return nil, ErrNotFound
+        }
         return nil, err
     }
-
     var m domain.WordleMatch
-    if err := json.Unmarshal(payload, &m); err != nil {
+    if err := json.Unmarshal(row.Data, &m); err != nil {
         return nil, err
     }
     return &m, nil
@@ -64,26 +57,32 @@ func fetchMatchTx(ctx context.Context, tx *sql.Tx, id string) (*domain.WordleMat
 
 // Create inserts a fresh match in the waiting state.
 func (r *MatchRepository) Create(ctx context.Context, m *domain.WordleMatch) error {
-    bytes, err := json.Marshal(m)
+    payload, err := json.Marshal(m)
     if err != nil {
         return err
     }
-    _, err = r.db.ExecContext(ctx, `INSERT INTO matches (id, data) VALUES ($1, $2)`, m.ID, bytes)
-    return err
+    row := matchRow{
+        ID:        m.ID,
+        Data:      datatypes.JSON(payload),
+        UpdatedAt: time.Now(),
+    }
+    if err := r.db.WithContext(ctx).Create(&row).Error; err != nil {
+        return err
+    }
+    return nil
 }
 
 // Get retrieves the match and returns a deep copy.
 func (r *MatchRepository) Get(ctx context.Context, id string) (*domain.WordleMatch, error) {
-    var payload []byte
-    err := r.db.QueryRowContext(ctx, `SELECT data FROM matches WHERE id = $1`, id).Scan(&payload)
-    if err == sql.ErrNoRows {
-        return nil, ErrNotFound
-    }
-    if err != nil {
+    var row matchRow
+    if err := r.db.WithContext(ctx).First(&row, "id = ?", id).Error; err != nil {
+        if errors.Is(err, gorm.ErrRecordNotFound) {
+            return nil, ErrNotFound
+        }
         return nil, err
     }
     var m domain.WordleMatch
-    if err := json.Unmarshal(payload, &m); err != nil {
+    if err := json.Unmarshal(row.Data, &m); err != nil {
         return nil, err
     }
     return &m, nil
@@ -91,149 +90,139 @@ func (r *MatchRepository) Get(ctx context.Context, id string) (*domain.WordleMat
 
 // Start sets a match to in_progress and records the start timestamp.
 func (r *MatchRepository) Start(ctx context.Context, id string, now time.Time) error {
-    tx, err := r.db.BeginTx(ctx, nil)
-    if err != nil {
-        return err
-    }
-    defer func() { _ = tx.Rollback() }()
+    return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+        m, err := fetchLocked(ctx, tx, id)
+        if err != nil {
+            return err
+        }
+        m.Status = domain.MatchInProgress
+        m.StartedAt = &now
 
-    m, err := fetchMatchTx(ctx, tx, id)
-    if err != nil {
-        return err
-    }
-
-    // Update fields.
-    m.Status = domain.MatchInProgress
-    m.StartedAt = &now
-
-    bytes, err := json.Marshal(m)
-    if err != nil {
-        return err
-    }
-
-    if _, err := tx.ExecContext(ctx, `UPDATE matches SET data = $1, updated_at = $2 WHERE id = $3`, bytes, now, id); err != nil {
-        return err
-    }
-    return tx.Commit()
+        payload, err := json.Marshal(m)
+        if err != nil {
+            return err
+        }
+        if err := tx.Model(&matchRow{}).
+            Where("id = ?", id).
+            Updates(map[string]any{
+                "data":       datatypes.JSON(payload),
+                "updated_at": now,
+            }).Error; err != nil {
+            return err
+        }
+        return nil
+    })
 }
 
 // AddGuess appends a guess for the specified player and updates their remaining clock.
 func (r *MatchRepository) AddGuess(ctx context.Context, matchID string, playerID string, guess domain.Guess, remainingMs int64) error {
-    tx, err := r.db.BeginTx(ctx, nil)
-    if err != nil {
-        return err
-    }
-    defer func() { _ = tx.Rollback() }()
-
-    m, err := fetchMatchTx(ctx, tx, matchID)
-    if err != nil {
-        return err
-    }
-
-    // Find player index.
-    idx := -1
-    for i := range m.Players {
-        if m.Players[i].ID == playerID {
-            idx = i
-            break
+    return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+        m, err := fetchLocked(ctx, tx, matchID)
+        if err != nil {
+            return err
         }
-    }
-    if idx == -1 {
-        return errors.New("player not part of match")
-    }
+        playerIndex := -1
+        for i := range m.Players {
+            if m.Players[i].ID == playerID {
+                playerIndex = i
+                break
+            }
+        }
+        if playerIndex == -1 {
+            return errors.New("player not part of match")
+        }
+        m.Players[playerIndex].Guesses = append(m.Players[playerIndex].Guesses, guess)
+        m.Players[playerIndex].RemainingMs = remainingMs
 
-    // Mutate.
-    m.Players[idx].Guesses = append(m.Players[idx].Guesses, guess)
-    m.Players[idx].RemainingMs = remainingMs
-
-    bytes, err := json.Marshal(m)
-    if err != nil {
-        return err
-    }
-
-    if _, err := tx.ExecContext(ctx, `UPDATE matches SET data = $1, updated_at = $2 WHERE id = $3`, bytes, time.Now(), matchID); err != nil {
-        return err
-    }
-    return tx.Commit()
+        payload, err := json.Marshal(m)
+        if err != nil {
+            return err
+        }
+        if err := tx.Model(&matchRow{}).
+            Where("id = ?", matchID).
+            Updates(map[string]any{
+                "data":       datatypes.JSON(payload),
+                "updated_at": time.Now(),
+            }).Error; err != nil {
+            return err
+        }
+        return nil
+    })
 }
 
 // SetPlayerConnected toggles the connected flag for a player.
 func (r *MatchRepository) SetPlayerConnected(ctx context.Context, matchID, playerID string, connected bool) error {
-    tx, err := r.db.BeginTx(ctx, nil)
-    if err != nil {
-        return err
-    }
-    defer func() { _ = tx.Rollback() }()
-
-    m, err := fetchMatchTx(ctx, tx, matchID)
-    if err != nil {
-        return err
-    }
-
-    idx := -1
-    for i := range m.Players {
-        if m.Players[i].ID == playerID {
-            idx = i
-            break
+    return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+        m, err := fetchLocked(ctx, tx, matchID)
+        if err != nil {
+            return err
         }
-    }
-    if idx == -1 {
-        return errors.New("player not part of match")
-    }
+        playerIndex := -1
+        for i := range m.Players {
+            if m.Players[i].ID == playerID {
+                playerIndex = i
+                break
+            }
+        }
+        if playerIndex == -1 {
+            return errors.New("player not part of match")
+        }
+        m.Players[playerIndex].Connected = connected
 
-    m.Players[idx].Connected = connected
-
-    bytes, err := json.Marshal(m)
-    if err != nil {
-        return err
-    }
-
-    if _, err := tx.ExecContext(ctx, `UPDATE matches SET data = $1, updated_at = $2 WHERE id = $3`, bytes, time.Now(), matchID); err != nil {
-        return err
-    }
-    return tx.Commit()
+        payload, err := json.Marshal(m)
+        if err != nil {
+            return err
+        }
+        if err := tx.Model(&matchRow{}).
+            Where("id = ?", matchID).
+            Updates(map[string]any{
+                "data":       datatypes.JSON(payload),
+                "updated_at": time.Now(),
+            }).Error; err != nil {
+            return err
+        }
+        return nil
+    })
 }
 
 // Finish marks the match as finished with the given end state and winner.
 func (r *MatchRepository) Finish(ctx context.Context, matchID, playerID string, endState domain.FinishedState, now time.Time) error {
-    tx, err := r.db.BeginTx(ctx, nil)
-    if err != nil {
-        return err
-    }
-    defer func() { _ = tx.Rollback() }()
-
-    m, err := fetchMatchTx(ctx, tx, matchID)
-    if err != nil {
-        return err
-    }
-
-    m.Status = domain.MatchFinished
-    m.EndedAt = &now
-
-    if playerID != "" {
-        for i := range m.Players {
-            if m.Players[i].ID == playerID {
-                m.Players[i].FinishedState = endState
-            } else {
-                // If other player is still none, you might decide what to do; leave unchanged.
+    return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+        m, err := fetchLocked(ctx, tx, matchID)
+        if err != nil {
+            return err
+        }
+        m.Status = domain.MatchFinished
+        m.EndedAt = &now
+        if playerID != "" {
+            for i := range m.Players {
+                if m.Players[i].ID == playerID {
+                    m.Players[i].FinishedState = endState
+                }
             }
         }
-    }
-
-    bytes, err := json.Marshal(m)
-    if err != nil {
-        return err
-    }
-
-    if _, err := tx.ExecContext(ctx, `UPDATE matches SET data = $1, updated_at = $2 WHERE id = $3`, bytes, now, matchID); err != nil {
-        return err
-    }
-    return tx.Commit()
+        payload, err := json.Marshal(m)
+        if err != nil {
+            return err
+        }
+        if err := tx.Model(&matchRow{}).
+            Where("id = ?", matchID).
+            Updates(map[string]any{
+                "data":       datatypes.JSON(payload),
+                "updated_at": now,
+            }).Error; err != nil {
+            return err
+        }
+        return nil
+    })
 }
 
 // Delete removes a match entirely.
 func (r *MatchRepository) Delete(ctx context.Context, id string) error {
-    _, err := r.db.ExecContext(ctx, `DELETE FROM matches WHERE id = $1`, id)
-    return err
+    if err := r.db.WithContext(ctx).Delete(&matchRow{}, "id = ?", id).Error; err != nil {
+        return err
+    }
+    return nil
 }
+
 

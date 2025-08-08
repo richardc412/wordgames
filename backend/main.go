@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"log"
 	"net/http"
 	"os"
@@ -13,11 +12,14 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	_ "github.com/joho/godotenv/autoload"
-	_ "github.com/lib/pq" // <-- driver
+
+	pgdriver "gorm.io/driver/postgres"
+	"gorm.io/gorm"
 
 	"server/internal/auth"
 	"server/internal/database/domain"
-	"server/internal/database/postgres"
+	dbmigrate "server/internal/database/migrate"
+	postgresrepo "server/internal/database/postgres"
 )
 
 // ----------------------------------------------------------------------------
@@ -70,27 +72,35 @@ func (a *App) joinMatch(c *gin.Context) {
 // main – initialise DB, repo, router, etc.
 // ----------------------------------------------------------------------------
 func main() {
-	// 1. Connect to PostgreSQL
-	dsn := os.Getenv("DATABASE_URL") // e.g. postgres://user:pass@localhost:5432/wordle
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		log.Fatalf("opening DB: %v", err)
-	}
-	db.SetMaxOpenConns(10)
-	db.SetConnMaxIdleTime(5 * time.Minute)
+    // 1. Connect to PostgreSQL via GORM
+    dsn := os.Getenv("DATABASE_URL") // e.g. postgres://user:pass@localhost:5432/wordle
+    gormDB, err := gorm.Open(pgdriver.Open(dsn), &gorm.Config{})
+    if err != nil {
+        log.Fatalf("opening DB: %v", err)
+    }
+    // Configure pool and ping
+    sqlDB, err := gormDB.DB()
+    if err != nil {
+        log.Fatalf("acquire sql DB: %v", err)
+    }
+    sqlDB.SetMaxOpenConns(10)
+    sqlDB.SetConnMaxIdleTime(5 * time.Minute)
+    if err := sqlDB.PingContext(context.Background()); err != nil {
+        log.Fatalf("ping DB: %v", err)
+    }
 
-	// Optional: ping on startup to fail fast
-	if err := db.PingContext(context.Background()); err != nil {
-		log.Fatalf("ping DB: %v", err)
-	}
+    // 2. Run migrations
+    if err := dbmigrate.Run(context.Background(), gormDB); err != nil {
+        log.Fatalf("migrate: %v", err)
+    }
 
-	// 2. Create the repository
-	repo := postgres.NewMatchRepository(db)
+    // 3. Create the repository
+    repo := postgresrepo.NewMatchRepository(gormDB)
 
-	// 3. Build the App with shared deps
+    // 4. Build the App with shared deps
 	app := &App{Repo: repo}
 
-	// 4. Router setup
+    // 5. Router setup
 	r := gin.Default()
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     []string{"http://localhost:5173"},
@@ -100,7 +110,7 @@ func main() {
 		MaxAge:           12 * time.Hour,
 	}))
 
-	// 5. Routes – bind methods
+    // 6. Routes – bind methods
 	r.POST("/matches", app.createMatch)
 	r.GET("/join",   app.joinMatch)
 
