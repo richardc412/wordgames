@@ -8,7 +8,6 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
-	"github.com/joho/godotenv"
 )
 
 // -----------------------------------------------------------------------------
@@ -35,12 +34,6 @@ type MatchClaims struct {
 var jwtSecret []byte
 
 func init() {
-    // Load environment variables from .env file
-    if err := godotenv.Load(); err != nil {
-        // .env file doesn't exist, which is fine for development
-        log.Println("No .env file found, using system environment variables")
-    }
-
     // Get JWT secret from environment
     secret := getenv("JWT_SECRET", "dev_secret_change_me")
     if secret == "dev_secret_change_me" {
